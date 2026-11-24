@@ -73,13 +73,15 @@ final class AntigravityUsageTests: XCTestCase {
             cache: SnapshotTimestampOfficialSnapshotCache(),
             gate: PassthroughOfficialFetchGate(),
             homeDirectory: { self.temporaryDirectory.path },
-            environment: { [:] },
+            environment: { ["GEMINI_API_KEY": "should-be-stripped"] },
             shell: runner,
             cacheTTL: 0
         )
 
         let snapshot = try await provider.fetch(forceRefresh: true)
         XCTAssertEqual(runner.lastEnvironment?["AGY_CLI_DISABLE_AUTO_UPDATE"], "true")
+        XCTAssertNil(runner.lastEnvironment?["GEMINI_API_KEY"])
+        XCTAssertNotEqual(runner.lastEnvironment?["HOME"], temporaryDirectory.path)
         XCTAssertEqual(runner.lastArguments, ["-p", "/usage", "--output-format", "json"])
         XCTAssertEqual(snapshot.sourceLabel, "Gemini.app")
         XCTAssertEqual(snapshot.unit, "%")
@@ -181,6 +183,27 @@ final class AntigravityUsageTests: XCTestCase {
             } else {
                 XCTFail("Unexpected ProviderError: \(error)")
             }
+        }
+    }
+
+    func testEmptyGroupsEnvelopeThrowsUnauthorizedDetailInsteadOfInvalidResponse() {
+        let emptyGroupsJSON = """
+        {"conversation_id":"","status":"SUCCESS","response":"","command":{"name":"usage","data":{"groups":[]}}}
+        """
+        do {
+            _ = try AntigravityProvider.parseCLIUsageOutput(
+                stdout: emptyGroupsJSON,
+                descriptor: .defaultOfficialAntigravity()
+            )
+            XCTFail("Expected unauthorizedDetail when agy returns empty groups")
+        } catch let error as ProviderError {
+            if case .unauthorizedDetail = error {
+                // Expected: unauthenticated or gateway-only session surfaces actionable sign-in error.
+            } else {
+                XCTFail("Unexpected ProviderError: \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error: \(error)")
         }
     }
 

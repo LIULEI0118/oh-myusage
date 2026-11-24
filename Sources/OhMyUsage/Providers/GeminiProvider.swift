@@ -169,8 +169,17 @@ final class GeminiProvider: UsageProvider, @unchecked Sendable {
                     }
                 }
 
-                if let cliSnapshot = try? await loadFromDesktopHelperCLI(forceRefresh: forceRefresh) {
-                    return cliSnapshot
+                do {
+                    return try await loadFromDesktopHelperCLI(forceRefresh: forceRefresh)
+                } catch let cliError as ProviderError {
+                    if case .missingCredential = cliError {
+                        // Desktop helper CLI is not installed; fall through to web/API error below.
+                    } else if let webProviderError = webError as? ProviderError,
+                              case .missingCredential = webProviderError {
+                        throw cliError
+                    }
+                } catch {
+                    // Ignore non-ProviderError fallback failures when another primary error exists.
                 }
 
                 if case .missingCredential = apiError, let webError {

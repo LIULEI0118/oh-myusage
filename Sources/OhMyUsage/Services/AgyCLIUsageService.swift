@@ -171,10 +171,23 @@ enum AgyCLIUsageService {
     ) throws -> AgyCLIUsageReport {
         let probeDir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("omu-agy-probe-\(UUID().uuidString)", isDirectory: true)
-        try? FileManager.default.createDirectory(at: probeDir, withIntermediateDirectories: true)
+        let probeHome = probeDir.appendingPathComponent("home", isDirectory: true)
+        let probeWorkDir = probeDir.appendingPathComponent("work", isDirectory: true)
+        try? FileManager.default.createDirectory(at: probeHome, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: probeWorkDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: probeDir) }
 
+        prepareIsolatedProbeHome(probeHome: probeHome, realHomeDirectory: homeDirectory)
+
         var childEnv = environment
+        // Run inside an isolated HOME linking only Keychains + `.gemini/users` so
+        // custom `~/.gemini/config/config.json` gateway / API-key overrides never
+        // shadow macOS Keychain consumer OAuth quota lookups, and background poll
+        // logs are automatically cleaned up with `probeDir`.
+        childEnv["HOME"] = probeHome.path
+        childEnv.removeValue(forKey: "GEMINI_API_KEY")
+        childEnv.removeValue(forKey: "GOOGLE_API_KEY")
+        childEnv.removeValue(forKey: "GEMINI_DIR")
         // Documented official flag: literal lowercase "true" suppresses passive CLI auto-updates.
         childEnv["AGY_CLI_DISABLE_AUTO_UPDATE"] = "true"
         // Prevent unauthenticated probes from launching a browser sign-in window.
@@ -183,10 +196,10 @@ enum AgyCLIUsageService {
         guard let result = shell.run(
             executable: executablePath,
             arguments: ["-p", "/usage", "--output-format", "json"],
-            input: nil,
+            input: "\n",
             timeout: 30,
             environment: childEnv,
-            currentDirectory: probeDir.path
+            currentDirectory: probeWorkDir.path
         ) else {
             throw ProviderError.timeout(Localizer.systemText(.agyCLITimeout))
         }
@@ -264,6 +277,15 @@ enum AgyCLIUsageService {
                 ) {
                     return textReport
                 }
+            }
+
+            // 3. `agy` returns `{"status":"SUCCESS","response":"","command":{"name":"usage","data":{"groups":[]}}}`
+            // when authenticated only via a custom gateway or when no OAuth account is signed in.
+            if let commandObj = root["command"] as? [String: Any],
+               let dataObj = commandObj["data"] as? [String: Any],
+               let groups = dataObj["groups"] as? [Any],
+               groups.isEmpty {
+                throw ProviderError.unauthorizedDetail(Localizer.systemText(.agyCLINotSignedIn))
             }
         }
 
@@ -580,6 +602,29 @@ enum AgyCLIUsageService {
         let plain = ISO8601DateFormatter()
         plain.formatOptions = [.withInternetDateTime]
         return plain.date(from: trimmed)
+    }
+
+    private static func prepareIsolatedProbeHome(probeHome: URL, realHomeDirectory: String) {
+        let fm = FileManager.default
+        let realKeychains = "\(realHomeDirectory)/Library/Keychains"
+        if fm.fileExists(atPath: realKeychains) {
+            let probeLibrary = probeHome.appendingPathComponent("Library", isDirectory: true)
+            try? fm.createDirectory(at: probeLibrary, withIntermediateDirectories: true)
+            try? fm.createSymbolicLink(
+                atPath: probeLibrary.appendingPathComponent("Keychains").path,
+                withDestinationPath: realKeychains
+            )
+        }
+
+        let realGeminiUsers = "\(realHomeDirectory)/.gemini/users"
+        if fm.fileExists(atPath: realGeminiUsers) {
+            let probeGemini = probeHome.appendingPathComponent(".gemini", isDirectory: true)
+            try? fm.createDirectory(at: probeGemini, withIntermediateDirectories: true)
+            try? fm.createSymbolicLink(
+                atPath: probeGemini.appendingPathComponent("users").path,
+                withDestinationPath: realGeminiUsers
+            )
+        }
     }
 
     private static func readDesktopLastLoginUsername(homeDirectory: String) -> String? {
